@@ -1,0 +1,9 @@
+{
+  "name": "vercel-cli-runner",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Internal service, deployed as its own Vercel project (Root Directory = vercel-cli-runner). Not tenant-facing. Runs the real `vercel` CLI as a subprocess, authenticated with a tenant-supplied Personal Access Token, to do the things the OAuth Integration API structurally cannot: create a new project, create a Blob store, and provision a Supabase Marketplace resource. Cloudflare Workers (where itemlogs-website itself runs) can't spawn subprocesses, which is why this exists as a separate Node-runtime service that itemlogs-website's Worker calls over HTTP.",
+  "dependencies": {
+    "vercel": "^39.1.1"
+  }
+}
