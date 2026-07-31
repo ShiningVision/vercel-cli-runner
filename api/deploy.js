@@ -69,7 +69,7 @@ module.exports = async function handler(req, res) {
     const deployStart = Date.now();
     const { stdout, stderr } = await runVercel(
       ['deploy', '--token', token, '--yes', '--prod', ...scopeArgs],
-      { cwd: appDir, homeDir: workDir, timeoutMs: 50_000 }
+      { cwd: appDir, homeDir: workDir, timeoutMs: 52_000 }
     );
     console.log(`[deploy] done after ${Date.now() - deployStart}ms`);
     console.log('[deploy] stdout:', stdout);
