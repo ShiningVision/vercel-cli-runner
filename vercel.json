@@ -3,6 +3,10 @@
     "api/run.js": {
       "maxDuration": 60,
       "includeFiles": "node_modules/**"
+    },
+    "api/deploy.js": {
+      "maxDuration": 60,
+      "includeFiles": "node_modules/**"
     }
   }
 }
