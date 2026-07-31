@@ -79,13 +79,17 @@ module.exports = async function handler(req, res) {
       { cwd: appDir, homeDir: workDir,timeoutMs: 60_000 }
     );
 
-    // First deploy against the now-linked project. No env vars are attached
-    // yet, so this build will likely fail at runtime — that's expected and
-    // fixed by the redeploy at the end of this sequence.
-    await runVercel(
-      ['deploy', '--token', token, '--yes', ...scopeArgs],
-      { cwd: appDir, homeDir: workDir,timeoutMs: 180_000 }
-    );
+    // No separate "first deploy" here anymore. It used to exist only to
+    // implicitly create the project (back when we relied on `--name`), but
+    // `vercel link` above already creates/links the project explicitly, so
+    // that first build was pure dead weight — a whole redundant Next.js
+    // build+deploy cycle that did nothing but eat time. Given the runner's
+    // own Vercel Function is capped at maxDuration: 60s (Hobby plan's max),
+    // and this whole sequence was measured taking 55-60+ seconds and
+    // getting killed mid-flight, cutting one of the two full builds is the
+    // single biggest lever we have on total duration without upgrading to
+    // Pro. Blob/Supabase/env below now run against the freshly-linked
+    // project before the one real deploy at the end.
 
     // Blob store — auto-connects to the linked project.
     try {
