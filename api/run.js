@@ -49,10 +49,21 @@ module.exports = async function handler(req, res) {
 
   const scopeArgs = teamId ? ['--scope', teamId] : [];
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'itemlogs-'));
+  // lib/vercel-cli.js points HOME at workDir (Vercel Functions' real $HOME
+  // isn't writable). If the deployed source also lived directly in workDir,
+  // cwd would equal $HOME, and the CLI's "You are deploying your home
+  // directory. Do you want to continue? (y/N)" guard kicks in — a raw
+  // stdin prompt that `--yes` doesn't silence and that hangs forever since
+  // we never pipe an answer, eventually timing out. Deploying from a
+  // subdirectory of workDir keeps cwd and HOME distinct so that guard never
+  // fires, while .vercel/project.json (written relative to cwd) still lives
+  // alongside app source consistently across every step in this sequence.
+  const appDir = path.join(workDir, 'app');
   const warnings = [];
 
   try {
-    await fetchTemplateInto(workDir);
+    await fs.mkdir(appDir, { recursive: true });
+    await fetchTemplateInto(appDir);
 
     // Explicitly create + link the project first. The old approach relied
     // on `vercel deploy --name <domain>` to implicitly create a project as
@@ -65,7 +76,7 @@ module.exports = async function handler(req, res) {
     // way to create/link a project by name non-interactively.
     await runVercel(
       ['link', '--yes', '--project', domain, '--token', token, ...scopeArgs],
-      { cwd: workDir, timeoutMs: 60_000 }
+      { cwd: appDir, timeoutMs: 60_000 }
     );
 
     // First deploy against the now-linked project. No env vars are attached
@@ -73,14 +84,14 @@ module.exports = async function handler(req, res) {
     // fixed by the redeploy at the end of this sequence.
     await runVercel(
       ['deploy', '--token', token, '--yes', ...scopeArgs],
-      { cwd: workDir, timeoutMs: 180_000 }
+      { cwd: appDir, timeoutMs: 180_000 }
     );
 
     // Blob store — auto-connects to the linked project.
     try {
       await runVercel(
         ['blob', 'create-store', `${domain}-images`, '--access', 'public', '--yes', '--token', token],
-        { cwd: workDir, timeoutMs: 60_000 }
+        { cwd: appDir, timeoutMs: 60_000 }
       );
     } catch (err) {
       warnings.push(`Blob store creation failed: ${err.message}`);
@@ -101,7 +112,7 @@ module.exports = async function handler(req, res) {
     try {
       await runVercel(
         ['integration', 'add', 'supabase', '--token', token, ...scopeArgs],
-        { cwd: workDir, timeoutMs: 120_000 }
+        { cwd: appDir, timeoutMs: 120_000 }
       );
     } catch (err) {
       const acceptTermsUrl = extractAcceptTermsUrl(`${err.stdout || ''}\n${err.stderr || ''}`);
@@ -119,7 +130,7 @@ module.exports = async function handler(req, res) {
     try {
       await runVercel(
         ['env', 'add', 'AUTH_SECRET', 'production', '--token', token, '--force'],
-        { cwd: workDir, input: authSecret, timeoutMs: 30_000 }
+        { cwd: appDir, input: authSecret, timeoutMs: 30_000 }
       );
     } catch (err) {
       warnings.push(`Setting AUTH_SECRET failed: ${err.message}`);
@@ -129,7 +140,7 @@ module.exports = async function handler(req, res) {
     // effort) attached — this is the build the tenant actually sees.
     const { stdout, stderr } = await runVercel(
       ['deploy', '--token', token, '--yes', '--prod', ...scopeArgs],
-      { cwd: workDir, timeoutMs: 180_000 }
+      { cwd: appDir, timeoutMs: 180_000 }
     );
 
     const deploymentUrl = extractUrl(stdout);
