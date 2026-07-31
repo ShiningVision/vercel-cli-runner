@@ -74,10 +74,22 @@ module.exports = async function handler(req, res) {
     // later step failed with "Your codebase isn't linked to a project."
     // `vercel link --yes --project <name>` is the documented, non-deprecated
     // way to create/link a project by name non-interactively.
+    // Every internal timeoutMs below is deliberately kept well under the
+    // Vercel Function's own hard maxDuration: 60s cap. They used to be set
+    // at or above 60s (60s, 60s, 120s, 180s) — which meant our own timeout
+    // could never fire first, so a hang always ended in a silent platform
+    // kill with zero diagnostic output (exactly what happened: `link` hung
+    // and we got nothing but a bare "Task timed out after 60 seconds" with
+    // no idea which step it was on or what the CLI printed). Now every step
+    // gets its own clean, informative timeout error with whatever partial
+    // stdout/stderr it captured, well before Vercel's kill.
+    console.log('[link] starting');
+    const linkStart = Date.now();
     await runVercel(
       ['link', '--yes', '--project', domain, '--token', token, ...scopeArgs],
-      { cwd: appDir, homeDir: workDir,timeoutMs: 60_000 }
+      { cwd: appDir, homeDir: workDir, timeoutMs: 40_000 }
     );
+    console.log(`[link] done after ${Date.now() - linkStart}ms`);
 
     // No separate "first deploy" here anymore. It used to exist only to
     // implicitly create the project (back when we relied on `--name`), but
@@ -93,11 +105,15 @@ module.exports = async function handler(req, res) {
 
     // Blob store — auto-connects to the linked project.
     try {
+      console.log('[blob] starting');
+      const blobStart = Date.now();
       await runVercel(
         ['blob', 'create-store', `${domain}-images`, '--access', 'public', '--yes', '--token', token],
-        { cwd: appDir, homeDir: workDir,timeoutMs: 60_000 }
+        { cwd: appDir, homeDir: workDir, timeoutMs: 40_000 }
       );
+      console.log(`[blob] done after ${Date.now() - blobStart}ms`);
     } catch (err) {
+      console.log('[blob] failed:', err.message);
       warnings.push(`Blob store creation failed: ${err.message}`);
     }
 
@@ -114,11 +130,15 @@ module.exports = async function handler(req, res) {
     // it, pull the exact accept-terms URL out of the CLI's output, and
     // surface it as an actionable warning instead of a raw stack trace.
     try {
+      console.log('[supabase] starting');
+      const supabaseStart = Date.now();
       await runVercel(
         ['integration', 'add', 'supabase', '--token', token, ...scopeArgs],
-        { cwd: appDir, homeDir: workDir,timeoutMs: 120_000 }
+        { cwd: appDir, homeDir: workDir, timeoutMs: 40_000 }
       );
+      console.log(`[supabase] done after ${Date.now() - supabaseStart}ms`);
     } catch (err) {
+      console.log('[supabase] failed:', err.message);
       const acceptTermsUrl = extractAcceptTermsUrl(`${err.stdout || ''}\n${err.stderr || ''}`);
       if (acceptTermsUrl) {
         warnings.push(
@@ -132,20 +152,31 @@ module.exports = async function handler(req, res) {
     // AUTH_SECRET is the one value we generate ourselves rather than
     // depending on a Marketplace resource, so set it directly.
     try {
+      console.log('[env] starting');
+      const envStart = Date.now();
       await runVercel(
         ['env', 'add', 'AUTH_SECRET', 'production', '--token', token, '--force'],
-        { cwd: appDir, homeDir: workDir,input: authSecret, timeoutMs: 30_000 }
+        { cwd: appDir, homeDir: workDir, input: authSecret, timeoutMs: 30_000 }
       );
+      console.log(`[env] done after ${Date.now() - envStart}ms`);
     } catch (err) {
+      console.log('[env] failed:', err.message);
       warnings.push(`Setting AUTH_SECRET failed: ${err.message}`);
     }
 
     // Final production deploy, now that Blob/Supabase/env vars are (best
     // effort) attached — this is the build the tenant actually sees.
+    // 50s, not 180s: the platform hard-kills at 60s regardless of what we
+    // set here, so 180s was never actually reachable — it just meant we'd
+    // always get a silent platform kill instead of our own clear timeout
+    // error. 50s leaves a 10s buffer under the real cap.
+    console.log('[deploy] starting');
+    const deployStart = Date.now();
     const { stdout, stderr } = await runVercel(
       ['deploy', '--token', token, '--yes', '--prod', ...scopeArgs],
-      { cwd: appDir, homeDir: workDir,timeoutMs: 180_000 }
+      { cwd: appDir, homeDir: workDir, timeoutMs: 50_000 }
     );
+    console.log(`[deploy] done after ${Date.now() - deployStart}ms`);
 
     const deploymentUrl = extractUrl(stdout);
 
@@ -158,6 +189,10 @@ module.exports = async function handler(req, res) {
 
     res.status(200).json({ deploymentUrl, warnings, debugFinalDeploy: { stdout, stderr } });
   } catch (err) {
+    // Log to the runner's own Vercel logs too, not just the JSON response —
+    // if the Cloudflare Worker side times out first, it never sees this
+    // response body at all, so the logs are the only place this shows up.
+    console.log('[fatal]', err.message, 'stdout:', err.stdout, 'stderr:', err.stderr);
     res.status(500).json({
       error: err.message,
       stderr: err.stderr,
