@@ -76,7 +76,7 @@ module.exports = async function handler(req, res) {
     // way to create/link a project by name non-interactively.
     await runVercel(
       ['link', '--yes', '--project', domain, '--token', token, ...scopeArgs],
-      { cwd: appDir, timeoutMs: 60_000 }
+      { cwd: appDir, homeDir: workDir,timeoutMs: 60_000 }
     );
 
     // First deploy against the now-linked project. No env vars are attached
@@ -84,14 +84,14 @@ module.exports = async function handler(req, res) {
     // fixed by the redeploy at the end of this sequence.
     await runVercel(
       ['deploy', '--token', token, '--yes', ...scopeArgs],
-      { cwd: appDir, timeoutMs: 180_000 }
+      { cwd: appDir, homeDir: workDir,timeoutMs: 180_000 }
     );
 
     // Blob store — auto-connects to the linked project.
     try {
       await runVercel(
         ['blob', 'create-store', `${domain}-images`, '--access', 'public', '--yes', '--token', token],
-        { cwd: appDir, timeoutMs: 60_000 }
+        { cwd: appDir, homeDir: workDir,timeoutMs: 60_000 }
       );
     } catch (err) {
       warnings.push(`Blob store creation failed: ${err.message}`);
@@ -112,7 +112,7 @@ module.exports = async function handler(req, res) {
     try {
       await runVercel(
         ['integration', 'add', 'supabase', '--token', token, ...scopeArgs],
-        { cwd: appDir, timeoutMs: 120_000 }
+        { cwd: appDir, homeDir: workDir,timeoutMs: 120_000 }
       );
     } catch (err) {
       const acceptTermsUrl = extractAcceptTermsUrl(`${err.stdout || ''}\n${err.stderr || ''}`);
@@ -130,7 +130,7 @@ module.exports = async function handler(req, res) {
     try {
       await runVercel(
         ['env', 'add', 'AUTH_SECRET', 'production', '--token', token, '--force'],
-        { cwd: appDir, input: authSecret, timeoutMs: 30_000 }
+        { cwd: appDir, homeDir: workDir,input: authSecret, timeoutMs: 30_000 }
       );
     } catch (err) {
       warnings.push(`Setting AUTH_SECRET failed: ${err.message}`);
@@ -140,7 +140,7 @@ module.exports = async function handler(req, res) {
     // effort) attached — this is the build the tenant actually sees.
     const { stdout, stderr } = await runVercel(
       ['deploy', '--token', token, '--yes', '--prod', ...scopeArgs],
-      { cwd: appDir, timeoutMs: 180_000 }
+      { cwd: appDir, homeDir: workDir,timeoutMs: 180_000 }
     );
 
     const deploymentUrl = extractUrl(stdout);
