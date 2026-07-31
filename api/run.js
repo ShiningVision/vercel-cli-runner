@@ -127,18 +127,26 @@ module.exports = async function handler(req, res) {
 
     // Final production deploy, now that Blob/Supabase/env vars are (best
     // effort) attached — this is the build the tenant actually sees.
-    const { stdout } = await runVercel(
+    const { stdout, stderr } = await runVercel(
       ['deploy', '--token', token, '--yes', '--prod', ...scopeArgs],
       { cwd: workDir, timeoutMs: 180_000 }
     );
 
     const deploymentUrl = extractUrl(stdout);
 
-    res.status(200).json({ deploymentUrl, warnings });
+    // TEMPORARY: production deployments aren't showing up on tenants'
+    // dashboards despite this call exiting 0, and we have no visibility
+    // into why. Log + return the raw CLI output so we can see exactly what
+    // Vercel said instead of guessing again. Remove once root-caused.
+    console.log('[final deploy] stdout:', stdout);
+    console.log('[final deploy] stderr:', stderr);
+
+    res.status(200).json({ deploymentUrl, warnings, debugFinalDeploy: { stdout, stderr } });
   } catch (err) {
     res.status(500).json({
       error: err.message,
       stderr: err.stderr,
+      stdout: err.stdout,
       warnings,
     });
   } finally {
