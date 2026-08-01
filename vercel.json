@@ -7,6 +7,10 @@
     "api/deploy.js": {
       "maxDuration": 60,
       "includeFiles": "node_modules/**"
+    },
+    "api/retry-supabase.js": {
+      "maxDuration": 60,
+      "includeFiles": "node_modules/**"
     }
   }
 }

@@ -14,6 +14,34 @@ function extractAcceptTermsUrl(text) {
   return match ? match[0] : null;
 }
 
+// `vercel integration add` never prints the accept-terms URL as text — it
+// shells out straight to `xdg-open <url>` to launch a browser, and in this
+// headless runner that binary doesn't exist, so the CLI crashes with
+// `spawn xdg-open ENOENT` before the URL ever reaches stdout/stderr for
+// extractAcceptTermsUrl() to find. Standing in a fake `xdg-open` ahead of it
+// on PATH lets the CLI "succeed" at opening the browser (our stub just
+// records the argument and exits 0) so we get the real URL directly instead
+// of guessing at it from crash text.
+async function withOpenUrlCapture(workDir) {
+  const binDir = path.join(workDir, 'bin');
+  const capturedUrlFile = path.join(workDir, 'accept-terms-url.txt');
+  await fs.mkdir(binDir, { recursive: true });
+  const stubPath = path.join(binDir, 'xdg-open');
+  await fs.writeFile(stubPath, `#!/bin/sh\necho "$1" > "${capturedUrlFile}"\nexit 0\n`);
+  await fs.chmod(stubPath, 0o755);
+  return {
+    extraPath: binDir,
+    async readCapturedUrl() {
+      try {
+        const contents = (await fs.readFile(capturedUrlFile, 'utf8')).trim();
+        return contents || null;
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
 // This endpoint does the fast half of provisioning: create/link the
 // project, attach Blob + Supabase, and set AUTH_SECRET. Measured at
 // roughly 14 seconds total (link ~2s, blob ~3s, the expected first-time
@@ -107,24 +135,37 @@ module.exports = async function handler(req, res) {
     // browser-open attempt itself throws (no browser to open), so we catch
     // it, pull the exact accept-terms URL out of the CLI's output, and
     // surface it as an actionable warning instead of a raw stack trace.
+    let needsSupabaseConfirmation = false;
+    let acceptTermsUrl = null;
     try {
       console.log('[supabase] starting');
       const supabaseStart = Date.now();
-      await runVercel(
-        ['integration', 'add', 'supabase', '--token', token, ...scopeArgs],
-        { cwd: appDir, homeDir: workDir, timeoutMs: 40_000 }
-      );
-      console.log(`[supabase] done after ${Date.now() - supabaseStart}ms`);
-    } catch (err) {
-      console.log('[supabase] failed:', err.message);
-      const acceptTermsUrl = extractAcceptTermsUrl(`${err.stdout || ''}\n${err.stderr || ''}`);
-      if (acceptTermsUrl) {
-        warnings.push(
-          `Supabase needs a one-time approval on your Vercel account: visit ${acceptTermsUrl}, accept the terms, then contact support to finish attaching your database.`
+      const { extraPath, readCapturedUrl } = await withOpenUrlCapture(workDir);
+      try {
+        await runVercel(
+          ['integration', 'add', 'supabase', '--token', token, ...scopeArgs],
+          { cwd: appDir, homeDir: workDir, timeoutMs: 40_000, extraPath }
         );
-      } else {
-        warnings.push(`Supabase provisioning failed: ${err.message}`);
+        console.log(`[supabase] done after ${Date.now() - supabaseStart}ms`);
+      } catch (err) {
+        console.log('[supabase] failed:', err.message);
+        const capturedUrl = await readCapturedUrl();
+        const foundUrl =
+          capturedUrl || extractAcceptTermsUrl(`${err.stdout || ''}\n${err.stderr || ''}`);
+        if (foundUrl) {
+          needsSupabaseConfirmation = true;
+          acceptTermsUrl = foundUrl;
+          console.log('[supabase] captured accept-terms url:', foundUrl);
+          warnings.push(
+            `Supabase needs a one-time approval on your Vercel account before your database can attach.`
+          );
+        } else {
+          warnings.push(`Supabase provisioning failed: ${err.message}`);
+        }
       }
+    } catch (err) {
+      console.log('[supabase] setup error:', err.message);
+      warnings.push(`Supabase provisioning failed: ${err.message}`);
     }
 
     // AUTH_SECRET is the one value we generate ourselves rather than
@@ -142,7 +183,7 @@ module.exports = async function handler(req, res) {
       warnings.push(`Setting AUTH_SECRET failed: ${err.message}`);
     }
 
-    res.status(200).json({ ok: true, warnings });
+    res.status(200).json({ ok: true, warnings, needsSupabaseConfirmation, acceptTermsUrl });
   } catch (err) {
     // Log to the runner's own Vercel logs too, not just the JSON response —
     // if the Cloudflare Worker side times out first, it never sees this
