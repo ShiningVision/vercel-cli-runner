@@ -31,6 +31,7 @@ async function withOpenUrlCapture(workDir) {
   await fs.chmod(stubPath, 0o755);
   return {
     extraPath: binDir,
+    capturedUrlFile,
     async readCapturedUrl() {
       try {
         const contents = (await fs.readFile(capturedUrlFile, 'utf8')).trim();
@@ -140,13 +141,28 @@ module.exports = async function handler(req, res) {
     try {
       console.log('[supabase] starting');
       const supabaseStart = Date.now();
-      const { extraPath, readCapturedUrl } = await withOpenUrlCapture(workDir);
+      const { extraPath, capturedUrlFile, readCapturedUrl } = await withOpenUrlCapture(workDir);
       try {
-        await runVercel(
+        const result = await runVercel(
           ['integration', 'add', 'supabase', '--token', token, ...scopeArgs],
-          { cwd: appDir, homeDir: workDir, timeoutMs: 40_000, extraPath }
+          { cwd: appDir, homeDir: workDir, timeoutMs: 40_000, extraPath, watchFile: capturedUrlFile }
         );
-        console.log(`[supabase] done after ${Date.now() - supabaseStart}ms`);
+        if (result.watchedFileContent) {
+          // The CLI reached the "open a browser" call — our stub caught it
+          // and we killed the CLI immediately rather than riding out the
+          // full 40s timeout waiting for a human that isn't here.
+          needsSupabaseConfirmation = true;
+          acceptTermsUrl = result.watchedFileContent;
+          console.log(
+            `[supabase] captured accept-terms url after ${Date.now() - supabaseStart}ms:`,
+            acceptTermsUrl
+          );
+          warnings.push(
+            `Supabase needs a one-time approval on your Vercel account before your database can attach.`
+          );
+        } else {
+          console.log(`[supabase] done after ${Date.now() - supabaseStart}ms`);
+        }
       } catch (err) {
         console.log('[supabase] failed:', err.message);
         const capturedUrl = await readCapturedUrl();

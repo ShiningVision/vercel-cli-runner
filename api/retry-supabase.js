@@ -17,6 +17,7 @@ async function withOpenUrlCapture(workDir) {
   await fs.chmod(stubPath, 0o755);
   return {
     extraPath: binDir,
+    capturedUrlFile,
     async readCapturedUrl() {
       try {
         const contents = (await fs.readFile(capturedUrlFile, 'utf8')).trim();
@@ -75,15 +76,29 @@ module.exports = async function handler(req, res) {
     );
     console.log(`[link] done after ${Date.now() - linkStart}ms`);
 
-    const { extraPath, readCapturedUrl } = await withOpenUrlCapture(workDir);
+    const { extraPath, capturedUrlFile, readCapturedUrl } = await withOpenUrlCapture(workDir);
 
     console.log('[supabase] retry starting');
     const supabaseStart = Date.now();
     try {
-      await runVercel(
+      const result = await runVercel(
         ['integration', 'add', 'supabase', '--token', token, ...scopeArgs],
-        { cwd: appDir, homeDir: workDir, timeoutMs: 40_000, extraPath }
+        { cwd: appDir, homeDir: workDir, timeoutMs: 40_000, extraPath, watchFile: capturedUrlFile }
       );
+      if (result.watchedFileContent) {
+        // Terms still weren't accepted (wrong tab, different account, etc.)
+        // — same fast-fail as api/run.js instead of riding out the timeout.
+        console.log(
+          `[supabase] retry still needs approval after ${Date.now() - supabaseStart}ms:`,
+          result.watchedFileContent
+        );
+        res.status(200).json({
+          ok: false,
+          needsSupabaseConfirmation: true,
+          acceptTermsUrl: result.watchedFileContent,
+        });
+        return;
+      }
       console.log(`[supabase] retry done after ${Date.now() - supabaseStart}ms`);
       res.status(200).json({ ok: true });
     } catch (err) {
