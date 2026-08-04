@@ -2,6 +2,7 @@ const fs = require('fs/promises');
 const os = require('os');
 const path = require('path');
 const { runVercel } = require('../lib/vercel-cli');
+const { setProjectFramework } = require('../lib/vercel-api');
 
 // Pulls the one-time Marketplace terms-acceptance link out of `vercel
 // integration add`'s output, when this is the first time this Vercel
@@ -109,6 +110,29 @@ module.exports = async function handler(req, res) {
       { cwd: appDir, homeDir: workDir, timeoutMs: 40_000 }
     );
     console.log(`[link] done after ${Date.now() - linkStart}ms`);
+
+    // `vercel link` just ran against an empty directory — the real template
+    // source doesn't exist yet at this point (it's fetched later, inside
+    // api/deploy.js's own separate invocation). With nothing to detect a
+    // framework from, Vercel creates new projects with Framework Preset
+    // "Other". The later `vercel deploy` call has real source and builds it
+    // successfully — every route compiles fine — but because the *project*
+    // itself isn't configured as Next.js, Vercel never wires that build
+    // output into its routing table: the deploy reports "Ready" and every
+    // path, including API routes, serves a platform-level 404: NOT_FOUND.
+    // Confirmed live (itemlogs32: Framework Preset was "Other", site fully
+    // dead). Force it explicitly via the REST API so this never depends on
+    // auto-detection against an empty directory.
+    try {
+      console.log('[framework] setting to nextjs');
+      await setProjectFramework(domain, token, teamId);
+      console.log('[framework] set to nextjs');
+    } catch (err) {
+      console.log('[framework] failed:', err.message);
+      warnings.push(
+        `Could not confirm the project is set up as Next.js (${err.message}). If the deployed site 404s, set Framework Preset to "Next.js" in the project's Vercel settings.`
+      );
+    }
 
     // Blob store — auto-connects to the linked project.
     try {
