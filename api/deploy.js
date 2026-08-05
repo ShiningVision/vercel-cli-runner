@@ -73,7 +73,7 @@ module.exports = async function handler(req, res) {
 
     console.log('[fetch-template] starting');
     const fetchStart = Date.now();
-    await fetchTemplateInto(appDir);
+    const { commit: templateCommit, version: templateVersion } = await fetchTemplateInto(appDir);
     console.log(`[fetch-template] done after ${Date.now() - fetchStart}ms`);
 
     // --no-wait: don't block on the actual remote build. A real Next.js
@@ -100,7 +100,13 @@ module.exports = async function handler(req, res) {
     console.log('[deploy] stderr:', stderr);
 
     const deploymentUrl = canonicalUrl(domain);
-    res.status(200).json({ ok: true, deploymentUrl, previewUrl: extractUrl(stdout) });
+    res.status(200).json({
+      ok: true,
+      deploymentUrl,
+      previewUrl: extractUrl(stdout),
+      templateCommit,
+      templateVersion,
+    });
   } catch (err) {
     console.log('[fatal]', err.message, 'stdout:', err.stdout, 'stderr:', err.stderr);
     // Even a genuine timeout/error here doesn't necessarily mean the
