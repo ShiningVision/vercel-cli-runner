@@ -2,6 +2,8 @@ const fs = require('fs/promises');
 const os = require('os');
 const path = require('path');
 const { runVercel } = require('../lib/vercel-cli');
+const { createLogger } = require('../lib/log-capture');
+const { interpretSupabaseError } = require('../lib/error-messages');
 
 function extractAcceptTermsUrl(text) {
   const match = text.match(/https:\/\/vercel\.com\/\S*accept-terms\S*/);
@@ -64,21 +66,22 @@ module.exports = async function handler(req, res) {
   const scopeArgs = teamId ? ['--scope', teamId] : [];
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'itemlogs-'));
   const appDir = path.join(workDir, 'app');
+  const logger = createLogger();
 
   try {
     await fs.mkdir(appDir, { recursive: true });
 
-    console.log('[link] starting');
+    logger.log('[link] starting');
     const linkStart = Date.now();
     await runVercel(
       ['link', '--yes', '--project', domain, '--token', token, ...scopeArgs],
       { cwd: appDir, homeDir: workDir, timeoutMs: 40_000 }
     );
-    console.log(`[link] done after ${Date.now() - linkStart}ms`);
+    logger.log(`[link] done after ${Date.now() - linkStart}ms`);
 
     const { extraPath, capturedUrlFile, readCapturedUrl } = await withOpenUrlCapture(workDir);
 
-    console.log('[supabase] retry starting');
+    logger.log('[supabase] retry starting');
     const supabaseStart = Date.now();
     try {
       const result = await runVercel(
@@ -88,7 +91,7 @@ module.exports = async function handler(req, res) {
       if (result.watchedFileContent) {
         // Terms still weren't accepted (wrong tab, different account, etc.)
         // — same fast-fail as api/run.js instead of riding out the timeout.
-        console.log(
+        logger.log(
           `[supabase] retry still needs approval after ${Date.now() - supabaseStart}ms:`,
           result.watchedFileContent
         );
@@ -96,27 +99,41 @@ module.exports = async function handler(req, res) {
           ok: false,
           needsSupabaseConfirmation: true,
           acceptTermsUrl: result.watchedFileContent,
+          logs: logger.lines,
         });
         return;
       }
-      console.log(`[supabase] retry done after ${Date.now() - supabaseStart}ms`);
-      res.status(200).json({ ok: true });
+      logger.log(`[supabase] retry done after ${Date.now() - supabaseStart}ms`);
+      res.status(200).json({ ok: true, logs: logger.lines });
     } catch (err) {
-      console.log('[supabase] retry failed:', err.message);
+      logger.log('[supabase] retry failed:', err.message);
       const capturedUrl = await readCapturedUrl();
       const foundUrl =
         capturedUrl || extractAcceptTermsUrl(`${err.stdout || ''}\n${err.stderr || ''}`);
       if (foundUrl) {
         // Terms still weren't accepted (wrong tab, different account, etc.)
         // — ask again instead of silently giving up.
-        res.status(200).json({ ok: false, needsSupabaseConfirmation: true, acceptTermsUrl: foundUrl });
+        res.status(200).json({
+          ok: false,
+          needsSupabaseConfirmation: true,
+          acceptTermsUrl: foundUrl,
+          logs: logger.lines,
+        });
       } else {
-        res.status(500).json({ error: err.message, stderr: err.stderr, stdout: err.stdout });
+        logger.logBlock('[supabase] error detail', err.stderr || err.stdout);
+        res.status(500).json({
+          error: interpretSupabaseError(err.message),
+          stderr: err.stderr,
+          stdout: err.stdout,
+          logs: logger.lines,
+        });
       }
     }
   } catch (err) {
-    console.log('[fatal]', err.message, 'stdout:', err.stdout, 'stderr:', err.stderr);
-    res.status(500).json({ error: err.message, stderr: err.stderr, stdout: err.stdout });
+    logger.log('[fatal]', err.message);
+    logger.logBlock('[fatal stdout]', err.stdout);
+    logger.logBlock('[fatal stderr]', err.stderr);
+    res.status(500).json({ error: err.message, stderr: err.stderr, stdout: err.stdout, logs: logger.lines });
   } finally {
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
   }

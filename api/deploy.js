@@ -3,6 +3,7 @@ const os = require('os');
 const path = require('path');
 const { runVercel } = require('../lib/vercel-cli');
 const { fetchTemplateInto } = require('../lib/fetch-template');
+const { createLogger } = require('../lib/log-capture');
 
 function extractUrl(stdout) {
   const matches = stdout.match(/https?:\/\/\S+/g);
@@ -59,22 +60,23 @@ module.exports = async function handler(req, res) {
   const scopeArgs = teamId ? ['--scope', teamId] : [];
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'itemlogs-'));
   const appDir = path.join(workDir, 'app');
+  const logger = createLogger();
 
   try {
     await fs.mkdir(appDir, { recursive: true });
 
-    console.log('[link] starting');
+    logger.log('[link] starting');
     const linkStart = Date.now();
     await runVercel(
       ['link', '--yes', '--project', domain, '--token', token, ...scopeArgs],
       { cwd: appDir, homeDir: workDir, timeoutMs: 40_000 }
     );
-    console.log(`[link] done after ${Date.now() - linkStart}ms`);
+    logger.log(`[link] done after ${Date.now() - linkStart}ms`);
 
-    console.log('[fetch-template] starting');
+    logger.log('[fetch-template] starting');
     const fetchStart = Date.now();
     const { commit: templateCommit, version: templateVersion } = await fetchTemplateInto(appDir);
-    console.log(`[fetch-template] done after ${Date.now() - fetchStart}ms`);
+    logger.log(`[fetch-template] done after ${Date.now() - fetchStart}ms`);
 
     // --no-wait: don't block on the actual remote build. A real Next.js
     // production build here (native bcrypt/sharp compile + a from-scratch
@@ -89,15 +91,15 @@ module.exports = async function handler(req, res) {
     // seconds, not a minute — and the remote build simply continues after
     // we've already responded. Vercel serves its own "still building" splash
     // on the domain until it flips over automatically.
-    console.log('[deploy] starting');
+    logger.log('[deploy] starting');
     const deployStart = Date.now();
     const { stdout, stderr } = await runVercel(
       ['deploy', '--token', token, '--yes', '--prod', '--no-wait', ...scopeArgs],
       { cwd: appDir, homeDir: workDir, timeoutMs: 30_000 }
     );
-    console.log(`[deploy] done after ${Date.now() - deployStart}ms`);
-    console.log('[deploy] stdout:', stdout);
-    console.log('[deploy] stderr:', stderr);
+    logger.log(`[deploy] done after ${Date.now() - deployStart}ms`);
+    logger.logBlock('[deploy stdout]', stdout);
+    logger.logBlock('[deploy stderr]', stderr);
 
     const deploymentUrl = canonicalUrl(domain);
     res.status(200).json({
@@ -106,9 +108,12 @@ module.exports = async function handler(req, res) {
       previewUrl: extractUrl(stdout),
       templateCommit,
       templateVersion,
+      logs: logger.lines,
     });
   } catch (err) {
-    console.log('[fatal]', err.message, 'stdout:', err.stdout, 'stderr:', err.stderr);
+    logger.log('[fatal]', err.message);
+    logger.logBlock('[fatal stdout]', err.stdout);
+    logger.logBlock('[fatal stderr]', err.stderr);
     // Even a genuine timeout/error here doesn't necessarily mean the
     // deployment itself failed to kick off — `vercel deploy` had already
     // uploaded and queued the build by the time the CLI process printed
@@ -119,11 +124,16 @@ module.exports = async function handler(req, res) {
     // stuck despite the site coming up fine a bit later.
     const salvaged = extractUrl(`${err.stdout || ''}\n${err.stderr || ''}`);
     if (salvaged) {
-      console.log('[deploy] salvaged url after error, treating as success:', salvaged);
-      res.status(200).json({ ok: true, deploymentUrl: canonicalUrl(domain), previewUrl: salvaged });
+      logger.log('[deploy] salvaged url after error, treating as success:', salvaged);
+      res.status(200).json({
+        ok: true,
+        deploymentUrl: canonicalUrl(domain),
+        previewUrl: salvaged,
+        logs: logger.lines,
+      });
       return;
     }
-    res.status(500).json({ error: err.message, stderr: err.stderr, stdout: err.stdout });
+    res.status(500).json({ error: err.message, stderr: err.stderr, stdout: err.stdout, logs: logger.lines });
   } finally {
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
   }

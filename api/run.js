@@ -3,6 +3,8 @@ const os = require('os');
 const path = require('path');
 const { runVercel } = require('../lib/vercel-cli');
 const { setProjectFramework } = require('../lib/vercel-api');
+const { createLogger } = require('../lib/log-capture');
+const { interpretSupabaseError } = require('../lib/error-messages');
 
 // Pulls the one-time Marketplace terms-acceptance link out of `vercel
 // integration add`'s output, when this is the first time this Vercel
@@ -94,6 +96,7 @@ module.exports = async function handler(req, res) {
   // fires (not silenced by --yes) and hangs forever.
   const appDir = path.join(workDir, 'app');
   const warnings = [];
+  const logger = createLogger();
 
   try {
     await fs.mkdir(appDir, { recursive: true });
@@ -103,13 +106,13 @@ module.exports = async function handler(req, res) {
     // name if it does (which is what api/deploy.js relies on afterward,
     // since that's a separate, stateless invocation with nothing shared on
     // disk from this one).
-    console.log('[link] starting');
+    logger.log('[link] starting');
     const linkStart = Date.now();
     await runVercel(
       ['link', '--yes', '--project', domain, '--token', token, ...scopeArgs],
       { cwd: appDir, homeDir: workDir, timeoutMs: 40_000 }
     );
-    console.log(`[link] done after ${Date.now() - linkStart}ms`);
+    logger.log(`[link] done after ${Date.now() - linkStart}ms`);
 
     // `vercel link` just ran against an empty directory — the real template
     // source doesn't exist yet at this point (it's fetched later, inside
@@ -124,11 +127,11 @@ module.exports = async function handler(req, res) {
     // dead). Force it explicitly via the REST API so this never depends on
     // auto-detection against an empty directory.
     try {
-      console.log('[framework] setting to nextjs');
+      logger.log('[framework] setting to nextjs');
       await setProjectFramework(domain, token, teamId);
-      console.log('[framework] set to nextjs');
+      logger.log('[framework] set to nextjs');
     } catch (err) {
-      console.log('[framework] failed:', err.message);
+      logger.log('[framework] failed:', err.message);
       warnings.push(
         `Could not confirm the project is set up as Next.js (${err.message}). If the deployed site 404s, set Framework Preset to "Next.js" in the project's Vercel settings.`
       );
@@ -136,15 +139,15 @@ module.exports = async function handler(req, res) {
 
     // Blob store — auto-connects to the linked project.
     try {
-      console.log('[blob] starting');
+      logger.log('[blob] starting');
       const blobStart = Date.now();
       await runVercel(
         ['blob', 'create-store', `${domain}-images`, '--access', 'public', '--yes', '--token', token],
         { cwd: appDir, homeDir: workDir, timeoutMs: 40_000 }
       );
-      console.log(`[blob] done after ${Date.now() - blobStart}ms`);
+      logger.log(`[blob] done after ${Date.now() - blobStart}ms`);
     } catch (err) {
-      console.log('[blob] failed:', err.message);
+      logger.log('[blob] failed:', err.message);
       warnings.push(`Blob store creation failed: ${err.message}`);
     }
 
@@ -163,7 +166,7 @@ module.exports = async function handler(req, res) {
     let needsSupabaseConfirmation = false;
     let acceptTermsUrl = null;
     try {
-      console.log('[supabase] starting');
+      logger.log('[supabase] starting');
       const supabaseStart = Date.now();
       const { extraPath, capturedUrlFile, readCapturedUrl } = await withOpenUrlCapture(workDir);
       try {
@@ -177,7 +180,7 @@ module.exports = async function handler(req, res) {
           // full 40s timeout waiting for a human that isn't here.
           needsSupabaseConfirmation = true;
           acceptTermsUrl = result.watchedFileContent;
-          console.log(
+          logger.log(
             `[supabase] captured accept-terms url after ${Date.now() - supabaseStart}ms:`,
             acceptTermsUrl
           );
@@ -185,55 +188,59 @@ module.exports = async function handler(req, res) {
             `Supabase needs a one-time approval on your Vercel account before your database can attach.`
           );
         } else {
-          console.log(`[supabase] done after ${Date.now() - supabaseStart}ms`);
+          logger.log(`[supabase] done after ${Date.now() - supabaseStart}ms`);
         }
       } catch (err) {
-        console.log('[supabase] failed:', err.message);
+        logger.log('[supabase] failed:', err.message);
         const capturedUrl = await readCapturedUrl();
         const foundUrl =
           capturedUrl || extractAcceptTermsUrl(`${err.stdout || ''}\n${err.stderr || ''}`);
         if (foundUrl) {
           needsSupabaseConfirmation = true;
           acceptTermsUrl = foundUrl;
-          console.log('[supabase] captured accept-terms url:', foundUrl);
+          logger.log('[supabase] captured accept-terms url:', foundUrl);
           warnings.push(
             `Supabase needs a one-time approval on your Vercel account before your database can attach.`
           );
         } else {
-          warnings.push(`Supabase provisioning failed: ${err.message}`);
+          const interpreted = interpretSupabaseError(err.message);
+          logger.logBlock('[supabase] error detail', err.stderr || err.stdout);
+          warnings.push(`Supabase provisioning failed: ${interpreted}`);
         }
       }
     } catch (err) {
-      console.log('[supabase] setup error:', err.message);
-      warnings.push(`Supabase provisioning failed: ${err.message}`);
+      logger.log('[supabase] setup error:', err.message);
+      warnings.push(`Supabase provisioning failed: ${interpretSupabaseError(err.message)}`);
     }
 
     // AUTH_SECRET is the one value we generate ourselves rather than
     // depending on a Marketplace resource, so set it directly.
     try {
-      console.log('[env] starting');
+      logger.log('[env] starting');
       const envStart = Date.now();
       await runVercel(
         ['env', 'add', 'AUTH_SECRET', 'production', '--token', token, '--force'],
         { cwd: appDir, homeDir: workDir, input: req.body.authSecret, timeoutMs: 30_000 }
       );
-      console.log(`[env] done after ${Date.now() - envStart}ms`);
+      logger.log(`[env] done after ${Date.now() - envStart}ms`);
     } catch (err) {
-      console.log('[env] failed:', err.message);
+      logger.log('[env] failed:', err.message);
       warnings.push(`Setting AUTH_SECRET failed: ${err.message}`);
     }
 
-    res.status(200).json({ ok: true, warnings, needsSupabaseConfirmation, acceptTermsUrl });
+    res.status(200).json({ ok: true, warnings, needsSupabaseConfirmation, acceptTermsUrl, logs: logger.lines });
   } catch (err) {
     // Log to the runner's own Vercel logs too, not just the JSON response —
     // if the Cloudflare Worker side times out first, it never sees this
-    // response body at all, so the logs are the only place this shows up.
-    console.log('[fatal]', err.message, 'stdout:', err.stdout, 'stderr:', err.stderr);
+    // response body at all, so the logs (also persisted to D1 by
+    // itemlogs-website) are the only place this shows up after an hour.
+    logger.log('[fatal]', err.message, 'stdout:', err.stdout, 'stderr:', err.stderr);
     res.status(500).json({
       error: err.message,
       stderr: err.stderr,
       stdout: err.stdout,
       warnings,
+      logs: logger.lines,
     });
   } finally {
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
