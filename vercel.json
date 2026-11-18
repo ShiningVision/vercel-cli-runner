@@ -12,10 +12,6 @@
       "maxDuration": 60,
       "includeFiles": "node_modules/**"
     },
-    "api/add-spare-column.js": {
-      "maxDuration": 60,
-      "includeFiles": "node_modules/**"
-    },
     "api/retry-supabase.js": {
       "maxDuration": 60,
       "includeFiles": "node_modules/**"
