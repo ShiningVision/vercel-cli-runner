@@ -8,6 +8,10 @@
       "maxDuration": 60,
       "includeFiles": "node_modules/**"
     },
+    "api/migrate.js": {
+      "maxDuration": 60,
+      "includeFiles": "node_modules/**"
+    },
     "api/add-spare-column.js": {
       "maxDuration": 60,
       "includeFiles": "node_modules/**"
